@@ -1,0 +1,41 @@
+# Данные пользователя
+data/
+startup.log
+
+# Сборки
+build/
+dist/
+
+# Окружения
+venv/
+venv*/
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Тесты
+.pytest_cache/
+.coverage
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# ОС
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Бинарники
+binaries/
+
+# Прочее
+*.log
+*.tmp
+.env
+backup/ 
