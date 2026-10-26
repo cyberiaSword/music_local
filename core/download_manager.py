@@ -4,6 +4,7 @@
 """
 
 import logging
+import time
 from pathlib import Path
 
 from PyQt6.QtCore import QThread, pyqtSignal, QMutex
@@ -11,9 +12,11 @@ from PyQt6.QtCore import QThread, pyqtSignal, QMutex
 from core.database import Database
 from core.downloader import download_audio, DownloadResult, is_ytdlp_available
 from core.covers import get_cover_for_track
-import concurrent.futures
+from core.content_filter import ContentFilter
+
 
 logger = logging.getLogger('yt-local.dlmanager')
+MIN_AUDIO_SIZE = 100 * 1024
 
 
 class DownloadManager(QThread):
@@ -43,6 +46,7 @@ class DownloadManager(QThread):
         cover_mode: str = 'auto',
         video_frame_second: int = 15,
         proxy: str | None = None,
+        content_filter: ContentFilter | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -53,9 +57,10 @@ class DownloadManager(QThread):
         self.cover_mode = cover_mode
         self.video_frame_second = video_frame_second
         self.proxy = proxy
-
+        self.content_filter = content_filter
         self._stop = False
         self._mutex = QMutex()
+        self._attempted_track_ids: set[int] = set()
 
     def stop(self) -> None:
         """Останавливает поток (мягко)."""
@@ -86,17 +91,42 @@ class DownloadManager(QThread):
                 continue
 
             if not pending:
+                self._attempted_track_ids.clear()
                 self.msleep(2000)
                 continue
 
-            # Берём первый попавшийся
-            track = pending[0]
-            self._process_track(track)
+            available = [
+                track for track in pending
+                if track.id not in self._attempted_track_ids
+            ]
+            if not available:
+                self._attempted_track_ids.clear()
+                self.msleep(2000)
+                continue
+
+            track = available[0]
+            self._attempted_track_ids.add(track.id)
+            try:
+                self._process_track(track)
+            except Exception as error:
+                logger.exception(
+                    f"Необработанная ошибка трека {track.title} (id={track.id}): {error}"
+                )
+                try:
+                    self.db.set_download_status(track.id, 'failed')
+                except Exception:
+                    logger.exception(
+                        f"Не удалось сохранить статус ошибки трека id={track.id}"
+                    )
+                self.download_failed.emit(
+                    track.id, "Не удалось обработать трек. Проверьте журнал ошибок."
+                )
+                self.queue_changed.emit()
 
             if self._is_stopped():
                 break
 
-        logger.info("DownloadManager остановлен")
+        logger.info("Менеджер загрузок остановлен")
 
     def _process_track(self, track) -> None:
         """Скачивает один трек и обновляет БД."""
@@ -108,39 +138,44 @@ class DownloadManager(QThread):
         self.download_started.emit(track_id, track.title)
         self.queue_changed.emit()
 
-        # Колбэк прогресса yt-dlp
+        last_activity_at = 0.0
+
         def progress_hook(d: dict) -> None:
+            nonlocal last_activity_at
             if d.get('status') == 'downloading':
+                now = time.monotonic()
+                if now - last_activity_at >= 30:
+                    self.db.touch_download_activity(track_id)
+                    last_activity_at = now
                 total = d.get('total_bytes') or d.get('total_bytes_estimate')
                 downloaded = d.get('downloaded_bytes', 0)
                 if total and total > 0:
                     pct = int(downloaded * 100 / total)
                     self.download_progress.emit(track_id, pct)
             elif d.get('status') == 'finished':
+                self.db.touch_download_activity(track_id)
                 self.download_progress.emit(track_id, 100)
 
-        # Скачиваем
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(
-            download_audio,
+        # Скачивание выполняется в этом QThread; сетевой таймаут задаёт yt-dlp.
+        result = download_audio(
             url=track.url,
             video_id=track.video_id,
             output_dir=self.downloads_dir,
             quality_v0=self.quality_v0,
             progress_callback=progress_hook,
             proxy=self.proxy,
+            content_filter=self.content_filter,
         )
-        try:
-            result = future.result(timeout=300)   # 5 минут на скачивание
-        except concurrent.futures.TimeoutError:
-            logger.error(f"Таймаут скачивания: {track.title}")
-            self.db.set_download_status(track.id, 'failed')
-            self.download_failed.emit(track.id, "Таймаут (5 минут)")
-            return
-
 
         if self._is_stopped():
             self.db.set_download_status(track_id, 'pending')
+            return
+
+        if result.skipped:
+            logger.info(f"Отсеян: {track.title} — {result.skip_reason}")
+            self.db.set_download_status(track_id, 'skipped')
+            self.download_failed.emit(track_id, f"Отсеян: {result.skip_reason}")
+            self.queue_changed.emit()
             return
 
         if not result.success:
@@ -150,14 +185,41 @@ class DownloadManager(QThread):
             self.queue_changed.emit()
             return
 
+        mp3_path = result.mp3_path
+        try:
+            audio_is_valid = (
+                mp3_path is not None
+                and mp3_path.is_file()
+                and mp3_path.stat().st_size >= MIN_AUDIO_SIZE
+            )
+        except OSError:
+            audio_is_valid = False
+
+        if not audio_is_valid:
+            if mp3_path is not None:
+                try:
+                    if mp3_path.is_file() and mp3_path.stat().st_size < MIN_AUDIO_SIZE:
+                        mp3_path.unlink()
+                except OSError:
+                    logger.warning("Не удалось удалить неполный аудиофайл: %s", mp3_path)
+            message = "Загруженный аудиофайл отсутствует или слишком мал. Повторите загрузку."
+            self.db.set_download_status(track_id, 'failed', error=message)
+            self.download_failed.emit(track_id, message)
+            self.queue_changed.emit()
+            return
+
         # ---- Обложка ----
-        cover_path = get_cover_for_track(
-            track_id=track_id,
-            video_id=track.video_id,
-            covers_dir=self.covers_dir,
-            mode=self.cover_mode,
-            video_frame_second=self.video_frame_second,
-        )
+        try:
+            cover_path = get_cover_for_track(
+                track_id=track_id,
+                video_id=track.video_id,
+                covers_dir=self.covers_dir,
+                mode=self.cover_mode,
+                video_frame_second=self.video_frame_second,
+            )
+        except Exception as error:
+            logger.warning(f"Не удалось получить обложку для {track.title}: {error}")
+            cover_path = None
 
         # ---- Обновляем БД ----
         rel_mp3 = self._rel(result.mp3_path)

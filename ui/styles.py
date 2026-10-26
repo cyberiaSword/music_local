@@ -1,4 +1,3 @@
-from PyQt6.QtWidgets import QSlider, QStyle, QStyleOptionSlider
 """
 QSS-стили и цветовая палитра приложения.
 """
@@ -38,7 +37,7 @@ def build_stylesheet() -> str:
     QMainWindow, QWidget {{
         background-color: {c['bg_primary']};
         color: {c['text_primary']};
-        font-family: "Segoe UI", "SF Pro Display", "Roboto", sans-serif;
+        font-family: "Segoe UI";
         font-size: 13px;
     }}
 
@@ -186,6 +185,110 @@ def build_stylesheet() -> str:
 
     QListView#TrackList::item:selected {{
         background: transparent;
+    }}
+
+    QFrame#SkeletonRow {{
+        background-color: #292929;
+        border: 1px solid #303030;
+        border-radius: 10px;
+    }}
+
+    QFrame#OverviewTrackCard {{
+        background-color: {c['bg_secondary']};
+        border: 1px solid {c['border']};
+        border-radius: 14px;
+    }}
+
+    QFrame#OverviewTrackCard:hover {{
+        background-color: {c['bg_elevated']};
+        border-color: {c['border_light']};
+    }}
+
+    QFrame#OverviewTrackCard:focus {{
+        border: 1px solid {c['accent_green']};
+    }}
+
+    QScrollArea#OverviewScroll, QScrollArea#OverviewRowScroll,
+    QWidget#OverviewCardsRow {{
+        background: transparent;
+        border: none;
+    }}
+
+    QFrame#OverviewStatTile {{
+        background-color: {c['bg_secondary']};
+        border: 1px solid {c['border']};
+        border-radius: 10px;
+    }}
+
+    QLabel#OverviewStatValue {{
+        font-size: 18px;
+        font-weight: 600;
+        color: {c['text_primary']};
+    }}
+
+    QPushButton#OverviewPlayButton {{
+        background-color: {c['accent_green']};
+        color: #000;
+        border: 1px solid transparent;
+        border-radius: 10px;
+        padding: 4px 10px;
+        font-weight: 600;
+    }}
+
+    QPushButton#OverviewPlayButton:hover {{
+        background-color: {c['accent_green_h']};
+    }}
+
+    QPushButton#OverviewPlayButton:focus {{
+        border-color: {c['text_primary']};
+    }}
+
+    QLabel#OverviewSectionTitle {{
+        color: {c['text_primary']};
+        font-size: 18px;
+        font-weight: 600;
+        padding-left: 2px;
+    }}
+
+    QLabel#OverviewCardTitle {{
+        color: {c['text_primary']};
+        font-size: 13px;
+        font-weight: 600;
+    }}
+
+    QLabel#OverviewCardSubtitle, QLabel#OverviewMessage {{
+        color: {c['text_secondary']};
+        font-size: 12px;
+    }}
+
+    /* ============ Пустые состояния ============ */
+    QWidget#TrackEmptyState {{
+        background: transparent;
+    }}
+
+    QLabel#EmptyStateTitle {{
+        color: {c['text_primary']};
+        font-size: 21px;
+        font-weight: 700;
+    }}
+
+    QLabel#EmptyStateDescription {{
+        color: {c['text_secondary']};
+        font-size: 13px;
+    }}
+
+    QPushButton#EmptyStateButton {{
+        background-color: {c['accent_green']};
+        color: #000000;
+        border: none;
+        border-radius: 18px;
+        padding: 9px 20px;
+        font-size: 13px;
+        font-weight: 600;
+    }}
+
+    QPushButton#EmptyStateButton:hover {{
+        background-color: {c['accent_green_h']};
     }}
 
     /* ============ Скроллбары ============ */
@@ -524,100 +627,3 @@ def build_stylesheet() -> str:
         font-size: 13px;
     }}
     """
-"""
-Кастомные виджеты.
-"""
-
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import QSlider, QStyle
-
-
-class ClickableSlider(QSlider):
-    """
-    QSlider, который перематывает по клику на дорожку,
-    а не только по перетаскиванию бегунка.
-
-    Сигнал clicked_seek испускается, когда пользователь кликнул
-    по дорожке (не по бегунку) — с новым значением в диапазоне
-    слайдера (0..maximum()).
-    """
-
-    clicked_seek = pyqtSignal(int)
-
-    def __init__(self, orientation=Qt.Orientation.Horizontal, parent=None):
-        super().__init__(orientation, parent)
-
-    def mousePressEvent(self, event):
-        # ЛКМ по дорожке — сразу перематываем
-        if event.button() == Qt.MouseButton.LeftButton:
-            value = self._value_from_position(event.position().toPoint())
-
-            # Проверяем, попал ли клик в бегунок.
-            # Если да — отдаём событие базовому классу (обычное перетаскивание).
-            handle_rect = self._handle_rect()
-            if handle_rect.contains(event.position().toPoint()):
-                super().mousePressEvent(event)
-                return
-
-            # Клик по дорожке — устанавливаем значение
-            self.setSliderDown(True)
-            self.setValue(value)
-            self.clicked_seek.emit(value)
-            event.accept()
-            return
-
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        # Перетаскивание — базовое поведение
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self.isSliderDown():
-            self.setSliderDown(False)
-        super().mouseReleaseEvent(event)
-
-    # ---- Внутренние утилиты ----
-
-    def _value_from_position(self, pos) -> int:
-        """Преобразует координату клика в значение слайдера."""
-        if self.orientation() == Qt.Orientation.Horizontal:
-            # Учитываем отступы стиля (обычно около 0-2 пикселей)
-            groove = self._groove_rect()
-            if groove.width() == 0:
-                return self.minimum()
-            # Позиция относительно начала groove
-            x = max(0, min(pos.x() - groove.left(), groove.width()))
-            ratio = x / groove.width()
-        else:
-            groove = self._groove_rect()
-            if groove.height() == 0:
-                return self.minimum()
-            y = max(0, min(pos.y() - groove.top(), groove.height()))
-            # Вертикальный слайдер: сверху — максимум, снизу — минимум
-            ratio = 1.0 - (y / groove.height())
-
-        value = self.minimum() + round(ratio * (self.maximum() - self.minimum()))
-        return max(self.minimum(), min(self.maximum(), value))
-
-    def _groove_rect(self):
-        """Возвращает прямоугольник дорожки (groove) с учётом стиля."""
-        opt = QStyleOptionSlider()
-        self.initStyleOption(opt)
-        return self.style().subControlRect(
-            QStyle.ComplexControl.CC_Slider,
-            opt,
-            QStyle.SubControl.SC_SliderGroove,
-            self,
-        )
-
-    def _handle_rect(self):
-        """Возвращает прямоугольник бегунка (handle)."""
-        opt = QStyleOptionSlider()
-        self.initStyleOption(opt)
-        return self.style().subControlRect(
-            QStyle.ComplexControl.CC_Slider,
-            opt,
-            QStyle.SubControl.SC_SliderHandle,
-            self,
-        )

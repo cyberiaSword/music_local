@@ -4,29 +4,83 @@
 
 import logging
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import QPoint, Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar,
-    QPushButton, QAbstractItemView
+    QPushButton, QAbstractItemView, QMenu, QStackedWidget
 )
 
-from core.database import Database
+from core.database import Database, Playlist, Track
+from ui.feedback_widgets import EmptyStateWidget, SkeletonPlaceholder
 from ui.status_icons import get_status_icon, get_status_label
 from ui.styles import COLORS
 
 logger = logging.getLogger('yt-local.ui.downloads')
 
 
+class DownloadsLoader(QThread):
+    loaded = pyqtSignal(int, int, object, str)
+
+    def __init__(self, db: Database, request_id: int, offset: int, parent=None):
+        super().__init__(parent)
+        self.db = db
+        self.request_id = request_id
+        self.offset = offset
+
+    def run(self) -> None:
+        if self.isInterruptionRequested():
+            return
+        try:
+            tracks = self.db.get_downloads_page(limit=100, offset=self.offset)
+            if not self.isInterruptionRequested():
+                self.loaded.emit(self.request_id, self.offset, tracks, "")
+        except Exception as error:
+            logger.exception("Ошибка фоновой загрузки страницы загрузок")
+            if not self.isInterruptionRequested():
+                self.loaded.emit(self.request_id, self.offset, [], str(error))
+
+
 class DownloadsPage(QWidget):
     """Показывает треки со статусами pending / downloading / done / failed."""
 
     refresh_requested = pyqtSignal()
+    enqueue_requested = pyqtSignal(int, str)
+    playlist_add_requested = pyqtSignal(str, int)
+
+    def set_playlists(self, playlists: list[Playlist]) -> None:
+        self._playlists = list(playlists)
+
+    def _show_context_menu(self, position: QPoint) -> None:
+        index = self.table.indexAt(position)
+        if not index.isValid():
+            return
+        item = self.table.item(index.row(), 0)
+        track_id = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if not isinstance(track_id, int):
+            return
+        self.table.setCurrentCell(index.row(), index.column())
+        menu = QMenu(self)
+        next_action = menu.addAction("Играть следующим")
+        next_action.triggered.connect(
+            lambda: self.enqueue_requested.emit(track_id, "next"))
+        end_action = menu.addAction("Добавить в очередь")
+        end_action.triggered.connect(
+            lambda: self.enqueue_requested.emit(track_id, "end"))
+        submenu = menu.addMenu("Добавить в плейлист")
+        submenu.setEnabled(bool(self._playlists))
+        for playlist in self._playlists:
+            action = submenu.addAction(playlist.name)
+            action.triggered.connect(
+                lambda checked=False, target=playlist.id:
+                self.playlist_add_requested.emit(target, track_id))
+        menu.exec(self.table.viewport().mapToGlobal(position))
+        menu.deleteLater()
 
     def __init__(self, db: Database, parent=None):
         super().__init__(parent)
         self.db = db
+        self._playlists: list[Playlist] = []
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 16, 24, 16)
@@ -42,13 +96,14 @@ class DownloadsPage(QWidget):
         self.refresh_btn = QPushButton("  Обновить")
         self.refresh_btn.setObjectName("GhostButton")
         self.refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.refresh_btn.clicked.connect(self._reload)
         top.addWidget(self.refresh_btn)
 
         layout.addLayout(top)
 
         # ---- Таблица ----
         self.table = QTableWidget()
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
         self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels(
             ["Название", "Исполнитель", "Статус", "Прогресс", "Проигрываний"]
@@ -89,29 +144,100 @@ class DownloadsPage(QWidget):
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
 
-        layout.addWidget(self.table, stretch=1)
+        self.content_stack = QStackedWidget()
+        self.content_stack.addWidget(self.table)
+        self.empty_state = EmptyStateWidget()
+        self.empty_state.set_state(
+            "download", "Загрузок пока нет",
+            "Добавьте трек в библиотеку и запустите его загрузку.", "Обновить"
+        )
+        self.empty_state.action_requested.connect(self.refresh)
+        self.content_stack.addWidget(self.empty_state)
+        self.skeleton = SkeletonPlaceholder(rows=5, parent=self)
+        self.content_stack.addWidget(self.skeleton)
+        layout.addWidget(self.content_stack, stretch=1)
 
+        self._request_id = 0
+        self._offset = 0
+        self._has_more = True
+        self._page_loading = False
+        self._workers: set[DownloadsLoader] = set()
+        self.refresh_btn.clicked.connect(self.refresh)
+        self.table.verticalScrollBar().valueChanged.connect(self._maybe_load_more)
         self._reload()
 
     # ============================================================
     # Перезагрузка
     # ============================================================
 
+    def refresh(self) -> None:
+        self._reload()
+
     def _reload(self) -> None:
-        """Перечитывает все треки из БД."""
-        try:
-            tracks = self.db.get_all(sort_by='last_played', sort_desc=True)
-        except Exception as e:
-            logger.exception(f"Ошибка загрузки загрузок: {e}")
+        self._request_id += 1
+        self._offset = 0
+        self._has_more = True
+        self._page_loading = False
+        self.table.clearContents()
+        self.table.setRowCount(0)
+        self.content_stack.setCurrentWidget(self.skeleton)
+        self.skeleton.start()
+        self._start_page(0)
+
+    def _start_page(self, offset: int) -> None:
+        self._page_loading = True
+        worker = DownloadsLoader(self.db, self._request_id, offset, self)
+        self._workers.add(worker)
+        worker.loaded.connect(self._on_loaded)
+        worker.finished.connect(lambda current=worker: self._workers.discard(current))
+        worker.start()
+
+    def _on_loaded(
+        self, request_id: int, offset: int, tracks: list[Track], error: str
+    ) -> None:
+        if request_id != self._request_id:
             return
+        self._page_loading = False
+        if error:
+            self._has_more = False
+            if offset == 0:
+                self.skeleton.stop()
+                self.empty_state.set_state(
+                    "x-circle", "Не удалось загрузить список загрузок",
+                    "Проверьте подключение к базе данных и повторите попытку.", "Повторить"
+                )
+                self.content_stack.setCurrentWidget(self.empty_state)
+            else:
+                logger.warning("Не удалось загрузить следующую страницу загрузок")
+            return
+        self._has_more = len(tracks) == 100
+        self._offset = offset + len(tracks)
+        if not tracks and offset == 0:
+            self.skeleton.stop()
+            self.empty_state.set_state(
+                "download", "Загрузок пока нет",
+                "Добавьте трек в библиотеку и запустите его загрузку.", "Обновить"
+            )
+            self.content_stack.setCurrentWidget(self.empty_state)
+            return
+        self._render_tracks(tracks, offset)
+        self.skeleton.stop()
+        self.content_stack.setCurrentWidget(self.table)
 
-        # Сортируем: downloading, pending, failed, done
-        order = {'downloading': 0, 'pending': 1, 'failed': 2, 'done': 3}
-        tracks.sort(key=lambda t: (order.get(t.download_status, 4), t.id))
+    def _maybe_load_more(self, value: int) -> None:
+        scrollbar = self.table.verticalScrollBar()
+        if (
+            not self._page_loading
+            and self._has_more
+            and scrollbar.maximum() > 0
+            and value >= scrollbar.maximum() - 120
+        ):
+            self._start_page(self._offset)
 
-        self.table.setRowCount(len(tracks))
+    def _render_tracks(self, tracks: list[Track], start_row: int) -> None:
+        self.table.setRowCount(start_row + len(tracks))
 
-        for row, t in enumerate(tracks):
+        for row, t in enumerate(tracks, start=start_row):
             # Название (сохраняем track_id в UserRole)
             title_item = QTableWidgetItem(t.title)
             title_item.setData(Qt.ItemDataRole.UserRole, t.id)
@@ -154,13 +280,6 @@ class DownloadsPage(QWidget):
 
 
     def update_progress(self, track_id: int, percent: int) -> None:
-        """
-        Обновляет прогресс-бар для downloading-трека.
-        Для простоты перезагружает всю таблицу — на 100+ треках не критично.
-        """
-        self._reload()
-
-    def update_progress(self, track_id: int, percent: int) -> None:
         """Обновляет прогресс-бар одной строки."""
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 0)
@@ -173,3 +292,11 @@ class DownloadsPage(QWidget):
                 return
         # Если строки нет — трек ещё не отображён, перезагрузим
         self._reload()
+
+    def shutdown(self) -> None:
+        self._request_id += 1
+        self.skeleton.stop()
+        for worker in tuple(self._workers):
+            worker.requestInterruption()
+            worker.wait()
+        self._workers.clear()

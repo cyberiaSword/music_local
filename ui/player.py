@@ -1,8 +1,9 @@
-from ui.widgets import ClickableSlider
-from PyQt6.QtCore import QPropertyAnimation, QEasingCurve
 """
 Виджет нижнего плеера в стиле Spotify.
 """
+
+from ui.widgets import ClickableSlider
+from PyQt6.QtCore import QPropertyAnimation, QEasingCurve, pyqtProperty
 
 import logging
 
@@ -36,11 +37,20 @@ class PlayerWidget(QFrame):
     Высота фиксирована — 90 px.
     """
     lyrics_toggled = pyqtSignal(bool)
+    queue_toggled = pyqtSignal(bool)
+
     def __init__(self, player: Player, parent=None):
         super().__init__(parent)
         self.player = player
         self.setObjectName("PlayerBar")
         self.setFixedHeight(90)
+        self._accent_color = QColor(COLORS["bg_secondary"])
+        self._accent_animation = QPropertyAnimation(
+            self, b"accentColor", self
+        )
+        self._accent_animation.setDuration(420)
+        self._accent_animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self._update_accent_background()
 
         # Кэш текущей обложки для быстрого доступа
         self._current_track: Track | None = None
@@ -80,6 +90,11 @@ class PlayerWidget(QFrame):
         info.addWidget(self.channel_label)
 
         left.addLayout(info)
+        self.btn_like = self._make_icon_button("heart", "В избранное")
+        self.btn_like.setStyleSheet(self.btn_like.styleSheet() + """
+            QPushButton { margin-left: 8px; }
+        """)
+        left.addWidget(self.btn_like)
         left.addStretch()
 
         root.addLayout(left, stretch=3)
@@ -126,6 +141,8 @@ class PlayerWidget(QFrame):
         progress_row.addWidget(self.time_current)
 
         self.progress = ClickableSlider(Qt.Orientation.Horizontal)
+        self.progress.setObjectName("PlaybackProgress")
+        self.progress.setAccessibleName("Позиция воспроизведения")
         self.progress.setRange(0, 1000)
         self.progress.setValue(0)
         self.progress.sliderMoved.connect(self._on_seek)
@@ -154,6 +171,10 @@ class PlayerWidget(QFrame):
         self.btn_lyrics = self._make_icon_button("align-left", "Текст песни", toggle=True)
         self.btn_lyrics.setCheckable(True)
         right.insertWidget(0, self.btn_lyrics)   # слева от кнопки громкости
+        self.btn_queue = self._make_icon_button("library", "Очередь", toggle=True)
+        self.btn_queue.setAccessibleName("Показать очередь воспроизведения")
+        self.btn_queue.toggled.connect(self.queue_toggled.emit)
+        right.addWidget(self.btn_queue)
 
         self.btn_volume = self._make_icon_button("volume-2", "Звук", toggle=True)
         self.btn_volume.clicked.connect(self._on_mute_toggle)
@@ -188,9 +209,44 @@ class PlayerWidget(QFrame):
         self._pos_timer.start()
 
         self._seeking = False
+        self._position_animation = QPropertyAnimation(
+            self.progress, b"value", self
+        )
+        self._position_animation.setDuration(220)
+        self._position_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._muted = False
         self._prev_volume = self.player.get_volume()
         self.btn_lyrics.toggled.connect(self.lyrics_toggled.emit)
+
+    @pyqtProperty(QColor)
+    def accentColor(self) -> QColor:
+        return self._accent_color
+
+    @accentColor.setter
+    def accentColor(self, color: QColor) -> None:
+        self._accent_color = QColor(color)
+        self._update_accent_background()
+
+    def _update_accent_background(self) -> None:
+        color = self._accent_color
+        self.setStyleSheet(f"""
+            QFrame#PlayerBar {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 rgba({color.red()}, {color.green()}, {color.blue()}, 105),
+                    stop: 0.58 rgba({color.red()}, {color.green()}, {color.blue()}, 42),
+                    stop: 1 {COLORS['bg_primary']});
+                border-top: 1px solid rgba({color.red()}, {color.green()}, {color.blue()}, 70);
+            }}
+        """)
+
+    def _animate_background_accent(self, color: str | None) -> None:
+        target = QColor(color) if color else QColor(COLORS["bg_secondary"])
+        if not target.isValid():
+            target = QColor(COLORS["bg_secondary"])
+        self._accent_animation.stop()
+        self._accent_animation.setStartValue(self._accent_color)
+        self._accent_animation.setEndValue(target)
+        self._accent_animation.start()
 
     def _extract_accent_color(self, pixmap: QPixmap) -> str | None:
         """
@@ -252,6 +308,7 @@ class PlayerWidget(QFrame):
 
         btn = QPushButton()
         btn.setToolTip(tooltip)
+        btn.setAccessibleName(tooltip)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setCheckable(toggle)
         btn.setFlat(True)
@@ -314,14 +371,24 @@ class PlayerWidget(QFrame):
         self._current_track = track
         self.title_label.setText(track.title)
         self.channel_label.setText(track.channel or "—")
+        self.channel_label.setToolTip("")
         self._load_cover(track)
+
+    def _animate_progress_to(self, value: int) -> None:
+        if self._seeking or self.progress.isSliderDown():
+            return
+        animation = self._position_animation
+        animation.stop()
+        animation.setStartValue(self.progress.value())
+        animation.setEndValue(value)
+        animation.start()
 
     def _on_position_changed(self, pos_ms: int) -> None:
         if self._seeking:
             return
         dur = self.player.duration()
         if dur > 0:
-            self.progress.setValue(int(pos_ms * 1000 / dur))
+            self._animate_progress_to(int(pos_ms * 1000 / dur))
         self.time_current.setText(_fmt_time(pos_ms))
 
     def _on_duration_changed(self, dur_ms: int) -> None:
@@ -337,6 +404,9 @@ class PlayerWidget(QFrame):
         self.volume.blockSignals(True)
         self.volume.setValue(vol)
         self.volume.blockSignals(False)
+        self._muted = vol == 0
+        if vol > 0:
+            self._prev_volume = vol
 
         if vol == 0:
             icon_name = "volume-x"
@@ -348,16 +418,10 @@ class PlayerWidget(QFrame):
         self._set_button_icon(self.btn_volume, icon_name)
 
     def _on_error(self, msg: str) -> None:
-        logger.warning(f"Плеер: {msg}")
+        logger.warning(f"Ошибка плеера: {msg}")
         self.title_label.setText("Ошибка воспроизведения")
-        self.channel_label.setText(msg[:80])
-        # Кнопка лайка
-        self.btn_like = self._make_icon_button("heart", "В избранное")
-        # Чуть больше левого отступа от текста
-        self.btn_like.setStyleSheet(self.btn_like.styleSheet() + """
-            QPushButton { margin-left: 8px; }
-        """)
-        left.addWidget(self.btn_like)
+        self.channel_label.setText(msg.partition(".")[0])
+        self.channel_label.setToolTip(msg)
 
     def _on_shuffle_clicked(self) -> None:
         enabled = self.player.toggle_shuffle()
@@ -394,18 +458,19 @@ class PlayerWidget(QFrame):
                         Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                         Qt.TransformationMode.SmoothTransformation,
                     )
-                    # Акцентный цвет — применяем к прогрессу
                     accent = self._extract_accent_color(p)
-                    if accent:
-                        self._apply_accent(accent)
+                    self._apply_accent(accent)
 
         if pixmap is None:
+            self._apply_accent(None)
             pixmap = self._make_placeholder(track.title)
 
         self.cover_label.setPixmap(pixmap)
 
-    def _apply_accent(self, color: str) -> None:
-        """Меняет цвет прогресс-бара и кнопки Play на акцентный."""
+    def _apply_accent(self, color: str | None) -> None:
+        """Анимирует фон плеера и обновляет акцент элементов управления."""
+        self._animate_background_accent(color)
+        color = color or COLORS["accent_green"]
         self.progress.setStyleSheet(f"""
             QSlider::groove:horizontal {{
                 height: 4px;
@@ -416,12 +481,19 @@ class PlayerWidget(QFrame):
                 background: {color};
                 border-radius: 2px;
             }}
+            QSlider::add-page:horizontal {{
+                background: {COLORS['border_light']};
+                border-radius: 2px;
+            }}
             QSlider::handle:horizontal {{
-                background: {color};
+                background: #ffffff;
                 width: 12px;
                 height: 12px;
                 margin: -4px 0;
                 border-radius: 6px;
+            }}
+            QSlider::handle:horizontal:hover {{
+                background: {COLORS['accent_green_h']};
             }}
         """)
         self.btn_play.setStyleSheet(f"""
@@ -490,7 +562,7 @@ class PlayerWidget(QFrame):
             pos = self.player.position()
             dur = self.player.duration()
             if dur > 0:
-                self.progress.setValue(int(pos * 1000 / dur))
+                self._animate_progress_to(int(pos * 1000 / dur))
             self.time_current.setText(_fmt_time(pos))
 
     # ============================================================
@@ -505,21 +577,6 @@ class PlayerWidget(QFrame):
             self._prev_volume = self.player.get_volume()
             self.player.set_volume(0)
             self._muted = True
-
-    def _on_clicked_seek(self, value: int) -> None:
-        """
-        Пользователь кликнул по дорожке слайдера.
-        value — это 0..1000, надо преобразовать в миллисекунды.
-        """
-        dur = self.player.duration()
-        if dur <= 0:
-            return
-        pos = int(value * dur / 1000)
-        self.player.seek(pos)
-        # Сразу обновим подпись времени, не дожидаясь следующего тика
-        self.time_current.setText(_fmt_time(pos))
-        # И синхронизируем слайдер, чтобы handle визуально остался на месте
-        self.progress.setValue(value)
 
     def _on_clicked_seek(self, value: int) -> None:
         dur = self.player.duration()

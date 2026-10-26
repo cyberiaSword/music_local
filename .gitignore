@@ -39,3 +39,7 @@ binaries/
 *.tmp
 .env
 backup/ 
+bgutil-ytdlp-pot-provider/ 
+test.mp3 
+bgutil-ytdlp-pot-provider/ 
+test.mp3 

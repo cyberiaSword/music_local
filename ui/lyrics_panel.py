@@ -53,20 +53,22 @@ class LyricsPanel(QWidget):
         h_layout.addWidget(title)
         h_layout.addStretch()
 
-        close_btn = QPushButton("✕")
+        from ui.icons import get_icon
+
+        close_btn = QPushButton()
+        close_btn.setIcon(get_icon("close", 14, COLORS['text_secondary']))
+        close_btn.setToolTip("Закрыть текст песни")
+        close_btn.setAccessibleName("Закрыть текст песни")
         close_btn.setFixedSize(28, 28)
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         close_btn.setStyleSheet(f"""
             QPushButton {{
                 background: transparent;
-                color: {COLORS['text_secondary']};
                 border: none;
                 border-radius: 14px;
-                font-size: 14px;
             }}
             QPushButton:hover {{
                 background-color: {COLORS['bg_elevated']};
-                color: {COLORS['text_primary']};
             }}
         """)
         close_btn.clicked.connect(self._on_close)

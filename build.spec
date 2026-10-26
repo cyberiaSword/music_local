@@ -73,6 +73,11 @@ hiddenimports = [
     'websockets.asyncio.server',
     'websockets.server',
 
+    # pynput выбирает Windows backend динамически.
+    'pynput.keyboard._win32',
+    'pynput.mouse._win32',
+    'pynput._util.win32',
+
     # ---- PyQt6 ----
     'PyQt6.QtSvg',
     'PyQt6.QtMultimedia',
@@ -108,6 +113,11 @@ hiddenimports = [
     'ui.status_icons',
     'ui.widgets',
     'ui.optimizer_worker',
+    'pydantic',
+    'pydantic_core',
+    'annotated_types',
+    'typing_extensions',
+    'typing_inspection',
 ]
 
 # ============================================================

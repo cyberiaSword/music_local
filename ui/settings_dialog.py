@@ -3,16 +3,20 @@
 """
 
 import logging
+import subprocess
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QSignalBlocker, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
-    QCheckBox, QSpinBox, QPushButton, QLineEdit, QGroupBox,
-    QFormLayout, QProgressBar, QFileDialog, QMessageBox, QTabWidget, QWidget
+    QCheckBox, QSpinBox, QPushButton, QLineEdit, QFormLayout,
+    QProgressBar, QFileDialog, QMessageBox, QTabWidget, QWidget,
+    QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem,
 )
 
 from core.settings import Settings
+from core.paths import get_data_dir
+from core.cookies_updater import update_cookies_from_browser, check_cookies_valid
 from ui.optimizer_worker import OptimizerWorker
 from ui.styles import COLORS
 
@@ -23,6 +27,7 @@ class SettingsDialog(QDialog):
     """Модальное окно настроек."""
 
     settings_changed = pyqtSignal()
+    global_hotkeys_toggled = pyqtSignal(bool)
 
     def __init__(self, settings: Settings, downloads_dir: Path, parent=None):
         super().__init__(parent)
@@ -31,7 +36,7 @@ class SettingsDialog(QDialog):
         self._optimizer_worker: OptimizerWorker | None = None
 
         self.setWindowTitle("Настройки")
-        self.setMinimumSize(620, 540)
+        self.setMinimumSize(650, 600)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -40,7 +45,9 @@ class SettingsDialog(QDialog):
         tabs = QTabWidget()
         tabs.addTab(self._build_general_tab(), "Общие")
         tabs.addTab(self._build_download_tab(), "Скачивание")
+        tabs.addTab(self._build_filter_tab(), "Фильтры")
         tabs.addTab(self._build_appearance_tab(), "Внешний вид")
+        tabs.addTab(self._build_hotkeys_tab(), "Горячие клавиши")
         tabs.addTab(self._build_optimizer_tab(), "Оптимизация")
         layout.addWidget(tabs)
 
@@ -60,9 +67,69 @@ class SettingsDialog(QDialog):
 
         layout.addLayout(buttons)
 
+    def set_global_hotkeys_enabled(self, enabled: bool) -> None:
+        """Обновляет желаемое состояние без повторного запроса к MainWindow."""
+        with QSignalBlocker(self.global_hotkeys_cb):
+            self.global_hotkeys_cb.setChecked(enabled)
+
     # ============================================================
     # Вкладки
     # ============================================================
+
+    def _build_hotkeys_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        self.global_hotkeys_cb = QCheckBox("Включить глобальные клавиши")
+        self.global_hotkeys_cb.setChecked(
+            self.settings.get('global_hotkeys_enabled', True)
+        )
+        self.global_hotkeys_cb.toggled.connect(self.global_hotkeys_toggled.emit)
+        layout.addWidget(self.global_hotkeys_cb)
+
+        hint = QLabel(
+            "Применяется сразу. Кнопка «Отмена» не откатывает эту настройку. "
+            "Локальные сочетания работают только в окне приложения."
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        from ui.shortcuts import BINDINGS
+
+        global_bindings = (
+            ('Media Play/Pause', 'Играть / Пауза'),
+            ('Media Next', 'Следующий трек'),
+            ('Media Previous', 'Предыдущий трек'),
+            ('Media Stop', 'Остановить воспроизведение'),
+            ('Ctrl+Alt+Space', 'Играть / Пауза'),
+        )
+        rows = [('Глобальные', sequence, label)
+                for sequence, label in global_bindings]
+        rows.extend(('В окне', sequence, label)
+                    for _action_id, sequence, label in BINDINGS)
+        self.hotkeys_table = QTableWidget(len(rows), 3)
+        self.hotkeys_table.setHorizontalHeaderLabels(
+            ['Область', 'Сочетание', 'Действие']
+        )
+        self.hotkeys_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.hotkeys_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.hotkeys_table.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
+        self.hotkeys_table.verticalHeader().hide()
+        self.hotkeys_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.hotkeys_table.horizontalHeader().setStretchLastSection(True)
+        for row_index, row in enumerate(rows):
+            for column, text in enumerate(row):
+                item = QTableWidgetItem(text)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.hotkeys_table.setItem(row_index, column, item)
+        layout.addWidget(self.hotkeys_table)
+        return page
 
     def _build_general_tab(self) -> QWidget:
         page = QWidget()
@@ -70,7 +137,6 @@ class SettingsDialog(QDialog):
         form.setContentsMargins(16, 16, 16, 16)
         form.setSpacing(12)
 
-        # Папка загрузок
         self.downloads_edit = QLineEdit(str(self.downloads_dir))
         self.downloads_edit.setReadOnly(True)
         browse = QPushButton("...")
@@ -82,17 +148,14 @@ class SettingsDialog(QDialog):
         row.addWidget(browse)
         form.addRow("Папка загрузок:", row)
 
-        # Автозагрузка при старте
         self.auto_download_cb = QCheckBox("Автоматически скачивать новые треки")
         self.auto_download_cb.setChecked(self.settings.get('auto_download', True))
         form.addRow("", self.auto_download_cb)
 
-        # Сворачивать в трей
         self.tray_cb = QCheckBox("Сворачивать в трей при закрытии")
         self.tray_cb.setChecked(self.settings.get('minimize_to_tray', True))
         form.addRow("", self.tray_cb)
 
-        # Запускать свёрнутым
         self.start_minimized_cb = QCheckBox("Запускать приложение свёрнутым в трей")
         self.start_minimized_cb.setChecked(self.settings.get('start_minimized', False))
         form.addRow("", self.start_minimized_cb)
@@ -131,6 +194,107 @@ class SettingsDialog(QDialog):
         self.frame_second.setSuffix(" сек")
         self.frame_second.setValue(self.settings.get('video_frame_second', 15))
         form.addRow("Кадр из видео на:", self.frame_second)
+
+        # ---- Обновление данных авторизации ----
+        cookies_label = QLabel("Данные авторизации YouTube")
+        cookies_label.setStyleSheet(
+            "font-weight: 600;"
+            f"color: {COLORS['text_primary']};"
+            "padding-top: 12px;"
+        )
+        form.addRow(cookies_label)
+
+        cookies_desc = QLabel(
+            "Файлы cookie из браузера используются при загрузке. "
+            "Если YouTube их отклонит, приложение повторит попытку без них."
+        )
+        cookies_desc.setWordWrap(True)
+        cookies_desc.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px;")
+        form.addRow(cookies_desc)
+
+        self.cookies_status = QLabel("Проверка...")
+        self.cookies_status.setWordWrap(True)
+        self.cookies_status.setStyleSheet(
+            f"color: {COLORS['text_secondary']}; font-size: 12px; padding: 4px;"
+        )
+        form.addRow("Статус:", self.cookies_status)
+
+        cookies_row = QHBoxLayout()
+        self.update_cookies_btn = QPushButton("Обновить cookies из браузера")
+        self.update_cookies_btn.setObjectName("GhostButton")
+        self.update_cookies_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_cookies_btn.clicked.connect(self._on_update_cookies)
+        cookies_row.addWidget(self.update_cookies_btn)
+
+        self.open_cookies_folder_btn = QPushButton("Открыть папку")
+        self.open_cookies_folder_btn.setObjectName("GhostButton")
+        self.open_cookies_folder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.open_cookies_folder_btn.clicked.connect(self._open_cookies_folder)
+        cookies_row.addWidget(self.open_cookies_folder_btn)
+        cookies_row.addStretch()
+        form.addRow("", cookies_row)
+
+        self._refresh_cookies_status()
+        return page
+
+    def _build_filter_tab(self) -> QWidget:
+        """Вкладка «Фильтры» — правила скачивания."""
+        page = QWidget()
+        form = QFormLayout(page)
+        form.setContentsMargins(16, 16, 16, 16)
+        form.setSpacing(12)
+
+        # Описание
+        info = QLabel(
+            "Эти настройки определяют, какие видео скачивать, а какие — пропускать. "
+            "Отсеянные треки помечаются как «Пропущено» и не занимают место на диске."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet(
+            f"color: {COLORS['text_secondary']};"
+            "font-size: 12px;"
+            "padding: 8px;"
+            f"background-color: {COLORS['bg_tertiary']};"
+            "border-radius: 6px;"
+        )
+        form.addRow(info)
+
+        # Максимальная длительность
+        self.max_duration_spin = QSpinBox()
+        self.max_duration_spin.setRange(0, 36000)  # до 10 часов
+        self.max_duration_spin.setSuffix(" сек")
+        self.max_duration_spin.setSpecialValueText("Без ограничений")
+        self.max_duration_spin.setValue(self.settings.get('max_duration_seconds', 600))
+        form.addRow("Максимальная длительность:", self.max_duration_spin)
+
+        hint1 = QLabel("0 = без ограничений. По умолчанию: 600 сек (10 мин)")
+        hint1.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px;")
+        form.addRow("", hint1)
+
+        # Исключать подкасты
+        self.exclude_podcasts_cb = QCheckBox("Исключать подкасты")
+        self.exclude_podcasts_cb.setChecked(self.settings.get('exclude_podcasts', True))
+        form.addRow("", self.exclude_podcasts_cb)
+
+        # Исключать стримы
+        self.exclude_livestreams_cb = QCheckBox("Исключать стримы и трансляции")
+        self.exclude_livestreams_cb.setChecked(self.settings.get('exclude_livestreams', True))
+        form.addRow("", self.exclude_livestreams_cb)
+
+        # Дополнительные ключевые слова
+        self.extra_keywords_edit = QLineEdit()
+        self.extra_keywords_edit.setPlaceholderText("через запятую: dj set, megamix, ...")
+        extra_kw = self.settings.get('extra_exclude_keywords', [])
+        self.extra_keywords_edit.setText(', '.join(extra_kw))
+        form.addRow("Доп. ключевые слова:", self.extra_keywords_edit)
+
+        hint2 = QLabel(
+            "Видео, в названии которых встречаются эти слова, будут пропущены. "
+            "Разделяйте запятыми."
+        )
+        hint2.setWordWrap(True)
+        hint2.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px;")
+        form.addRow("", hint2)
 
         return page
 
@@ -172,7 +336,6 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
-        # Описание
         info = QLabel(
             "Файлы с битрейтом выше 250 kbps будут перекодированы в V0 "
             "(~245 kbps VBR). Это освободит место, но снизит качество таких файлов. "
@@ -188,7 +351,6 @@ class SettingsDialog(QDialog):
         )
         layout.addWidget(info)
 
-        # Порог
         threshold_row = QHBoxLayout()
         threshold_row.addWidget(QLabel("Порог битрейта:"))
         self.threshold_spin = QSpinBox()
@@ -199,12 +361,10 @@ class SettingsDialog(QDialog):
         threshold_row.addStretch()
         layout.addLayout(threshold_row)
 
-        # Dry run
         self.dry_run_cb = QCheckBox("Пробный запуск (ничего не удалять)")
         self.dry_run_cb.setChecked(True)
         layout.addWidget(self.dry_run_cb)
 
-        # Кнопки
         buttons_row = QHBoxLayout()
         self.analyze_btn = QPushButton("Анализировать")
         self.analyze_btn.setObjectName("GhostButton")
@@ -224,7 +384,6 @@ class SettingsDialog(QDialog):
         buttons_row.addStretch()
         layout.addLayout(buttons_row)
 
-        # Прогресс
         self.opt_progress = QProgressBar()
         self.opt_progress.setVisible(False)
         self.opt_progress.setTextVisible(True)
@@ -238,6 +397,69 @@ class SettingsDialog(QDialog):
         return page
 
     # ============================================================
+    # Cookies
+    # ============================================================
+
+    def _refresh_cookies_status(self) -> None:
+        """Обновляет статус cookies."""
+        cookies_path = get_data_dir() / 'cookies.txt'
+        is_valid, reason = check_cookies_valid(cookies_path)
+
+        if is_valid:
+            self.cookies_status.setText(f"Проверка пройдена: {reason}")
+            self.cookies_status.setStyleSheet(
+                f"color: {COLORS['accent_green']}; font-size: 12px; padding: 4px;"
+            )
+        else:
+            self.cookies_status.setText(f"Проверка не пройдена: {reason}")
+            self.cookies_status.setStyleSheet(
+                f"color: {COLORS['accent_red']}; font-size: 12px; padding: 4px;"
+            )
+
+    def _on_update_cookies(self) -> None:
+        """Обновляет данные авторизации и показывает результат рядом с кнопкой."""
+        self.update_cookies_btn.setEnabled(False)
+        self.update_cookies_btn.setText("Читаю данные авторизации...")
+
+        try:
+            cookies_path = get_data_dir() / 'cookies.txt'
+            result = update_cookies_from_browser(cookies_path)
+            if result.success:
+                is_valid, reason = check_cookies_valid(cookies_path)
+                if is_valid:
+                    self.cookies_status.setText(
+                        f"Проверка пройдена: получено файлов cookie — "
+                        f"{result.cookies_count} из браузера {result.browser}. "
+                        "Данные будут использованы при следующей загрузке."
+                    )
+                    self.cookies_status.setStyleSheet(
+                        f"color: {COLORS['accent_green']}; font-size: 12px; padding: 4px;"
+                    )
+                else:
+                    self.cookies_status.setText(f"Проверка не пройдена: {reason}")
+                    self.cookies_status.setStyleSheet(
+                        f"color: {COLORS['accent_red']}; font-size: 12px; padding: 4px;"
+                    )
+            else:
+                self.cookies_status.setText(
+                    "Не удалось обновить данные авторизации. Проверьте настройки браузера."
+                )
+                self.cookies_status.setStyleSheet(
+                    f"color: {COLORS['accent_red']}; font-size: 12px; padding: 4px;"
+                )
+        finally:
+            self.update_cookies_btn.setEnabled(True)
+            self.update_cookies_btn.setText("Обновить данные авторизации из браузера")
+
+    def _open_cookies_folder(self) -> None:
+        """Открывает папку data/ в проводнике."""
+        data_dir = get_data_dir()
+        try:
+            subprocess.Popen(['explorer', str(data_dir)])
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось открыть папку: {e}")
+
+    # ============================================================
     # Действия
     # ============================================================
 
@@ -249,6 +471,7 @@ class SettingsDialog(QDialog):
     def _save(self) -> None:
         """Сохраняет все настройки."""
         s = self.settings
+        s.set('global_hotkeys_enabled', self.global_hotkeys_cb.isChecked())
         s.set('auto_download', self.auto_download_cb.isChecked())
         s.set('minimize_to_tray', self.tray_cb.isChecked())
         s.set('start_minimized', self.start_minimized_cb.isChecked())
@@ -259,6 +482,15 @@ class SettingsDialog(QDialog):
         s.set('player_volume', self.volume_spin.value())
         s.set('player_autoplay_next', self.autoplay_cb.isChecked())
         s.set('optimize_threshold_kbps', self.threshold_spin.value())
+
+        # Фильтры
+        s.set('max_duration_seconds', self.max_duration_spin.value())
+        s.set('exclude_podcasts', self.exclude_podcasts_cb.isChecked())
+        s.set('exclude_livestreams', self.exclude_livestreams_cb.isChecked())
+        kw_text = self.extra_keywords_edit.text().strip()
+        extra_kw = [kw.strip() for kw in kw_text.split(',') if kw.strip()]
+        s.set('extra_exclude_keywords', extra_kw)
+
         s.save()
         self.settings_changed.emit()
         self.accept()

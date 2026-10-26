@@ -43,13 +43,18 @@ class TitleBar(QWidget):
 
         # Логотип
         from core.version import __version__
-        logo = QLabel(f"♪  YT Music Local  v{__version__}")
+        logo = QLabel(f"YT Music Local  v{__version__}")
         logo.setObjectName("TitleBarLogo")
         layout.addWidget(logo)
 
         # Поиск
         self.search = QLineEdit()
-        self.search.setPlaceholderText("🔍  Поиск")
+        self.search.setPlaceholderText("Поиск по библиотеке")
+        self.search.addAction(
+            get_icon("search", 16, COLORS['text_muted']),
+            QLineEdit.ActionPosition.LeadingPosition,
+        )
+        self.search.setAccessibleName("Поиск по библиотеке")
         self.search.setFixedWidth(320)
         self.search.textChanged.connect(self.search_changed.emit)
         layout.addWidget(self.search)

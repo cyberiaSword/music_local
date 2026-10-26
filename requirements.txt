@@ -1,6 +1,24 @@
-PyQt6>=6.6.0
-PyQt6-Qt6>=6.6.0
-websockets>=12.0
+# ==== UI ====
+PyQt6>=6.6.0,<7.0.0
+pynput>=1.8.2,<2.0.0
+
+# ==== Скачивание ====
 yt-dlp>=2025.1.1
 requests>=2.31.0
+
+# ==== WebSocket ====
+websockets>=12.0
+
+# ==== Тексты песен ====
 lyriq>=1.6.0
+
+# ==== Настройки ====
+pydantic>=2.9.0
+
+# ==== Cookies ====
+rookiepy>=0.5.0
+cryptography>=42.0.0
+
+# ==== Сборка (опционально) ====
+# pyinstaller>=6.14.0
+# Pillow>=10.0.0

@@ -39,7 +39,7 @@ from core.version import __version__, __app_name__
 
 _log("Импорт PyQt6")
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import QFont, QIcon
 
 _log("Импорт core")
 from core.database import Database
@@ -49,6 +49,7 @@ from core.ws_server import WebSocketServer
 _log("Импорт ui")
 from ui.main_window import MainWindow
 from ui.styles import build_stylesheet
+from core.runtime import install_exception_handlers
 
 _log("Все импорты успешны")
 
@@ -138,6 +139,11 @@ def main() -> int:
     app.setApplicationVersion(__version__)
     app.setOrganizationName("yt-music-local")
 
+    шрифт = QFont()
+    шрифт.setFamilies(["Segoe UI", "Arial"])
+    шрифт.setPointSize(10)
+    app.setFont(шрифт)
+
     # ---- Иконка ----
     _log("Загружаю иконку")
     try:
@@ -189,6 +195,10 @@ def main() -> int:
     _log("Создаю MainWindow")
     try:
         window = MainWindow(db, settings, ws)
+        window._exception_bridge = install_exception_handlers(
+            window, window.show_runtime_error
+        )
+        window.start_environment_check()
         window.show()
         _log("MainWindow показан")
     except Exception as e:
@@ -203,8 +213,7 @@ def main() -> int:
 
     # ---- Остановка ----
     logger.info("Остановка приложения")
-    ws.stop()
-    ws.wait(3000)
+    window._shutdown()
 
     _log("Приложение завершено")
     if _emergency_log:
